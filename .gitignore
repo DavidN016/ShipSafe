@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+.venv/
+venv/
+__pycache__/
+
+# Environment
+.env.local
+*.env.local
+
+# Build / output
+.next/
+dist/
+*.pyc
+.eggs/
+*.egg-info/
+
+# IDE / OS
+.idea/
+.DS_Store
+*.swp
+*.swo
+
+# Data / logs (optional)
+data/
+*.log
