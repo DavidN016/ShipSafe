@@ -1,0 +1,23 @@
+# --- Web & API ---
+fastapi[all]>=0.110.0
+uvicorn>=0.27.0
+python-multipart>=0.0.9
+
+# --- AI Orchestration & Agents ---
+langchain>=0.1.0
+langchain-openai>=0.1.0
+langgraph>=0.0.30
+pydantic>=2.6.0
+pydantic-settings>=2.2.0
+
+# Text splitters (kept separate in newer LangChain versions)
+langchain-text-splitters>=0.0.1
+
+# --- Vector Database & RAG ---
+chromadb>=0.4.24
+sentence-transformers>=2.5.0  # Required for Chroma's default local embedding
+
+# --- GitHub & Utilities ---
+PyGithub>=2.1.0               # For posting PR comments
+python-dotenv>=1.0.1          # For .env file management
+httpx>=0.27.0                 # For making async API calls
