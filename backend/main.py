@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from database.chroma import collection
-from backend.ingest import chunk_text_for_extension, async_batch_upload
+from backend.ingest import chunk_text_for_extension, async_batch_upload, ingest_repo_paths
 
 HOST = os.environ.get("SHIPSAFE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("SHIPSAFE_PORT", "8000"))
@@ -38,6 +38,12 @@ class DiffPayload(BaseModel):
     """Payload sent by pre-push hook. Use POST /analyze/diff to test the hook."""
     raw_diff: str
     file_path: str
+
+
+class RepoIngestRequest(BaseModel):
+    """Request to ingest user-selected repos (local paths) into Chroma."""
+    repo_paths: List[str]
+    repository: Optional[str] = None  # optional label; defaults to folder name per repo
 
 
 @app.get("/")
@@ -80,6 +86,21 @@ async def analyze_changes(payload: AnalyzeRequest) -> dict:
         "ingested_files": len(payload.files),
         "ingested_chunks": len(all_documents),
     }
+
+
+@app.post("/repos/ingest")
+async def ingest_repos(payload: RepoIngestRequest) -> dict:
+    """Ingest user-selected repo directories into Chroma.
+
+    Walks each path, skips EXCLUDE_PATHS (e.g. .git, node_modules) and
+    EXCLUDE_EXTENSIONS (e.g. images, archives), chunks code, and uploads.
+    Reuses the same ingestion/chunking pipeline as /analyze.
+    """
+    return await ingest_repo_paths(
+        collection=collection,
+        repo_paths=payload.repo_paths,
+        repository=payload.repository,
+    )
 
 
 @app.post("/analyze/diff")
