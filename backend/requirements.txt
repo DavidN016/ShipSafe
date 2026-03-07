@@ -10,6 +10,13 @@ langgraph>=0.0.30
 pydantic>=2.6.0
 pydantic-settings>=2.2.0
 
+# Auditor agent: CodeBERT-style / code-focused model (optional; needs GPU or patience on CPU)
+# CodeBERT is encoder-only; we use a generative code model (CodeT5) for JSON output.
+langchain-huggingface>=0.0.1
+transformers>=4.36.0
+torch>=2.0.0
+accelerate>=0.25.0
+
 # Text splitters (kept separate in newer LangChain versions)
 langchain-text-splitters>=0.0.1
 
