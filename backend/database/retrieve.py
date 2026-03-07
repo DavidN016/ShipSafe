@@ -7,15 +7,29 @@ from __future__ import annotations
 
 from typing import Any
 
-# Default max characters of diff to use as query (avoids token limits; rest is dropped for embedding only)
+# Default max characters of diff-derived query (avoids token limits)
 DEFAULT_MAX_DIFF_CHARS = 8_000
 
 
+def extract_diff_code(diff: str) -> str:
+    """Extract only added/removed line content from a unified diff."""
+    out: list[str] = []
+    for line in diff.splitlines():
+        if line.startswith("+++ ") or line.startswith("--- ") or line.startswith("@@"):
+            continue
+        if line.startswith("+") or line.startswith("-"):
+            out.append(line[1:])
+    return "\n".join(out)
+
+
 def _query_text(diff: str, max_chars: int | None) -> str:
-    """Use the full diff or a representative snippet for the embedding query."""
-    if max_chars is None or len(diff) <= max_chars:
+    """Build query from diff: only changed lines, then optionally truncate."""
+    code = extract_diff_code(diff)
+    if not code.strip():
         return diff
-    return diff[:max_chars] + "\n[... truncated for query ...]"
+    if max_chars is None or len(code) <= max_chars:
+        return code
+    return code[:max_chars] + "\n[... truncated ...]"
 
 
 def _build_where_filter(

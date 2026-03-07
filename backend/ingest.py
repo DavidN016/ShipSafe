@@ -44,8 +44,8 @@ except ImportError:  # pragma: no cover - fallback for older LangChain versions
     )
 
 
-CHUNK_SIZE = 1000
-CHUNK_OVERLAP = 100
+CHUNK_SIZE = 800
+CHUNK_OVERLAP = 0
 
 _EXTENSION_LANGUAGE_MAP: dict[str, Language] = {
     ".py": Language.PYTHON,
