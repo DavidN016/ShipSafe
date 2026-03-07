@@ -112,34 +112,6 @@ def chunk_text_for_extension(text: str, extension: str) -> List[str]:
     splitter = _get_splitter_for_path(dummy_path)
     return splitter.split_text(text)
 
-
-def batch_upload(
-    collection,
-    documents: List[str],
-    metadatas: List[dict],
-    ids: List[str],
-    batch_size: int = 100,
-) -> None:
-    """Upload chunks to ChromaDB in manageable batches.
-
-    Example:
-        batch_upload(collection, all_texts, all_metadata, all_ids)
-    """
-    total_chunks = len(documents)
-
-    for i in range(0, total_chunks, batch_size):
-        batch_docs = documents[i : i + batch_size]
-        batch_metas = metadatas[i : i + batch_size]
-        batch_ids = ids[i : i + batch_size]
-
-        collection.add(
-            documents=batch_docs,
-            metadatas=batch_metas,
-            ids=batch_ids,
-        )
-        print(f"Uploaded batch {i // batch_size + 1}: {len(batch_docs)} chunks...")
-
-
 async def async_batch_upload(
     collection,
     documents: List[str],
