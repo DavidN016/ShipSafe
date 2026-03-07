@@ -20,11 +20,22 @@ from pydantic import BaseModel
 from backend.database.chroma import collection
 from backend.ingest import chunk_text_for_extension, async_batch_upload, ingest_repo_paths
 from backend.database.retrieve import get_context_chunks, context_chunks_to_strings
+from backend.agents.graph import build_workflow
 
 HOST = os.environ.get("SHIPSAFE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("SHIPSAFE_PORT", "8000"))
 
 app = FastAPI(title="ShipSafe Backend", version="0.1.0")
+
+# Compiled LangGraph workflow (ingestion → retrieval → detection → audit → remediation → patch_audit loop)
+_workflow = None
+
+
+def _get_workflow():
+    global _workflow
+    if _workflow is None:
+        _workflow = build_workflow(collection)
+    return _workflow
 
 
 class FileChange(BaseModel):
@@ -39,9 +50,12 @@ class AnalyzeRequest(BaseModel):
 
 
 class DiffPayload(BaseModel):
-    """Payload sent by pre-push hook. Use POST /analyze/diff to test the hook."""
+    """Payload for pipeline: diff + file; optional repo/original_code for audit and retrieval."""
     raw_diff: str
     file_path: str
+    repository: Optional[str] = None
+    commit_sha: Optional[str] = None
+    original_code: Optional[str] = None
 
 
 class RepoIngestRequest(BaseModel):
@@ -136,12 +150,27 @@ async def retrieve_context(payload: RetrieveRequest) -> dict:
 
 @app.post("/analyze/diff")
 async def analyze_diff(payload: DiffPayload) -> dict:
-    """Temporary: accept pre-push hook payload (raw_diff + file_path), return 200.
-    Use this endpoint to test the hook; point the hook at SHIPSAFE_API_URL/analyze/diff."""
-    return {
-        "received": True,
-        "raw_diff_length": len(payload.raw_diff),
+    """Run the full pipeline: ingestion (state init) → retrieval → detection → audit → remediation → patch audit.
+    Request body: raw_diff, file_path; optional repository, commit_sha, original_code.
+    Returns final state so caller can post analysis/patch to GitHub (e.g. PR comment)."""
+    import asyncio
+    initial: dict = {
+        "raw_diff": payload.raw_diff,
         "file_path": payload.file_path,
+        "repository": payload.repository,
+        "commit_sha": payload.commit_sha,
+        "original_code": payload.original_code or "",
+    }
+    workflow = _get_workflow()
+    loop = asyncio.get_event_loop()
+    final = await loop.run_in_executor(None, lambda: workflow.invoke(initial))
+    return {
+        "file_path": final.get("file_path"),
+        "vulnerabilities": final.get("vulnerabilities") or [],
+        "is_verified": final.get("is_verified"),
+        "audit_feedback": final.get("audit_feedback"),
+        "remediation_patch": final.get("remediation_patch"),
+        "analysis_summary": final.get("analysis_summary"),
     }
 
 

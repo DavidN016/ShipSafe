@@ -300,3 +300,59 @@ def patch_audit_node(state: AgentState) -> dict[str, Any]:
     if not is_verified:
         out["iteration_count"] = (state.get("iteration_count") or 0) + 1
     return out
+
+# ---------------------------------------------------------------------------
+# 5.2 GitHub Comment node
+# ---------------------------------------------------------------------------
+
+def _build_github_comment_body(state: AgentState) -> str:
+    """Build PR comment: summary + remediation_patch + reasoning."""
+    vulns = state.get("vulnerabilities") or []
+    file_path = state.get("file_path", "")
+    analysis_summary = state.get("analysis_summary", "")
+    remediation_patch = state.get("remediation_patch", "")
+    audit_feedback = state.get("audit_feedback", "")
+
+    sections: list[str] = ["## ShipSafe Security Analysis\n"]
+
+    # Summary
+    summary_lines = [f"- **File:** `{file_path}`", f"- **Findings:** {len(vulns)} potential vulnerability(ies)"]
+    if analysis_summary:
+        summary_lines.append(f"- **Notes:** {analysis_summary}")
+    for v in vulns:
+        summary_lines.append(f"  - {v.get('type', '')}: {v.get('description', '')} (line {v.get('line_number', '?')})")
+    sections.append("### Summary\n" + "\n".join(summary_lines))
+
+    # Remediation patch
+    if remediation_patch:
+        sections.append("### Suggested fix (unified diff)\n```diff\n" + remediation_patch.strip() + "\n```")
+
+    # Reasoning
+    if audit_feedback:
+        sections.append("### Reasoning\n" + audit_feedback)
+
+    return "\n\n".join(sections)
+
+
+def github_comment_node(state: AgentState) -> dict[str, Any]:
+    """
+    Post PR comment with summary + remediation_patch + reasoning.
+    Reads repository (owner/repo), pr_number from state; no-op if missing.
+    """
+    repository = state.get("repository") or ""
+    pr_number = state.get("pr_number")
+    if not repository or pr_number is None:
+        return {}
+    parts = repository.split("/", 1)
+    owner = parts[0].strip() if parts else ""
+    repo = parts[1].strip() if len(parts) > 1 else ""
+    if not owner or not repo:
+        return {}
+    body = _build_github_comment_body(state)
+    try:
+        from backend.services.github_service import post_pr_comment
+        comment_url = post_pr_comment(owner, repo, int(pr_number), body)
+        return {"analysis_summary": (state.get("analysis_summary") or "") + f" [Comment: {comment_url}]"}
+    except Exception:
+        return {}
+

@@ -59,7 +59,7 @@ def _route_after_audit(state: AgentState) -> Literal["remediation", "end"]:
 
 
 def _route_after_patch_audit(state: AgentState) -> Literal["remediation", "end"]:
-    """If patch is secure, end; else loop back to Remediator (AGENTS.md §5)."""
+    """If patch is secure, end; else loop back to Remediator (AGENTS.md §5). Single-push flow: no PR comment."""
     if state.get("is_verified"):
         return "end"
     return "remediation"
