@@ -18,11 +18,15 @@ class Vulnerability(TypedDict, total=False):
 
 class AgentState(TypedDict, total=False):
 
-    # Ingestion
+    # Ingestion: top-level fields (filled by ingestion node from payload)
     repository: str
     commit_sha: str
     raw_diff: str
     file_path: str
+
+    # Optional webhook input: dict with repository, commit_sha, raw_diff, file_path [, original_code].
+    # Ingestion parses payload → writes the four above (and original_code); retrieval uses those.
+    payload: dict
 
     # Retrieval
     context_chunks: List[str]

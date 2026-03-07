@@ -1,7 +1,7 @@
 """
-LangGraph workflow: Chroma retrieval → Detection → Audit → Remediation → Patch verification (loop).
+LangGraph workflow: Ingestion → Retrieval → Detection → Audit → Remediation → Patch verification (loop).
 
-Per AGENTS.md §4 and §5. Ingestion (webhook, parse diff, init state) is done by the caller (e.g. FastAPI).
+Per AGENTS.md §4 and §5.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from backend.database.retrieve import context_chunks_to_strings, get_context_chu
 
 from .state import AgentState
 from .nodes import (
+    ingestion_node,
     auditor_node,
     detector_node,
     patch_audit_node,
@@ -22,8 +23,12 @@ from .nodes import (
 )
 
 
+# ---------------------------------------------------------------------------
+# 4.2 Retrieval node
+# ---------------------------------------------------------------------------
+
 def make_retrieval_node(collection: Any):
-    """Build a retrieval node that uses the given Chroma collection."""
+    """Call get_context_chunks / context_chunks_to_strings, write to context_chunks."""
 
     def retrieval_node(state: AgentState) -> dict[str, Any]:
         raw_diff = state.get("raw_diff") or ""
@@ -74,13 +79,15 @@ def build_workflow(collection: Any):
 
     retrieval_node_fn = make_retrieval_node(collection)
 
+    workflow.add_node("ingestion", ingestion_node)
     workflow.add_node("retrieval", retrieval_node_fn)
     workflow.add_node("detection", detector_node)
     workflow.add_node("audit", auditor_node)
     workflow.add_node("remediation", remediator_node)
     workflow.add_node("patch_audit", patch_audit_node)
 
-    workflow.add_edge(START, "retrieval")
+    workflow.add_edge(START, "ingestion")
+    workflow.add_edge("ingestion", "retrieval")
     workflow.add_edge("retrieval", "detection")
     workflow.add_conditional_edges(
         "detection",

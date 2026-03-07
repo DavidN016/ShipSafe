@@ -22,6 +22,33 @@ _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```")
 
 
 # ---------------------------------------------------------------------------
+# 4.1 Ingestion node
+# ---------------------------------------------------------------------------
+
+def ingestion_node(state: AgentState) -> dict[str, Any]:
+    """
+    Parse webhook payload (diff + file_path, repo/commit) and initialize AgentState.
+    Accepts either state.payload (dict) or top-level raw_diff, file_path, repository, commit_sha.
+    """
+    payload = state.get("payload")
+    if isinstance(payload, dict):
+        return {
+            "raw_diff": payload.get("raw_diff", ""),
+            "file_path": payload.get("file_path", ""),
+            "repository": payload.get("repository"),
+            "commit_sha": payload.get("commit_sha"),
+            "original_code": payload.get("original_code"),
+        }
+    return {
+        "raw_diff": state.get("raw_diff", ""),
+        "file_path": state.get("file_path", ""),
+        "repository": state.get("repository"),
+        "commit_sha": state.get("commit_sha"),
+        "original_code": state.get("original_code"),
+    }
+
+
+# ---------------------------------------------------------------------------
 # LLM (Detector / Remediator)
 # ---------------------------------------------------------------------------
 
