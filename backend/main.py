@@ -14,8 +14,9 @@ import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from database.chroma import collection
+from backend.database.chroma import collection
 from backend.ingest import chunk_text_for_extension, async_batch_upload, ingest_repo_paths
+from backend.database.retrieve import get_context_chunks, context_chunks_to_strings
 
 HOST = os.environ.get("SHIPSAFE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("SHIPSAFE_PORT", "8000"))
@@ -44,6 +45,15 @@ class RepoIngestRequest(BaseModel):
     """Request to ingest user-selected repos (local paths) into Chroma."""
     repo_paths: List[str]
     repository: Optional[str] = None  # optional label; defaults to folder name per repo
+
+
+class RetrieveRequest(BaseModel):
+    """Request to get context chunks for a diff (embed diff, query Chroma)."""
+    raw_diff: str
+    repository: Optional[str] = None  # restrict search to this repo (recommended when multiple repos in Chroma)
+    file_path: Optional[str] = None
+    n_results: Optional[int] = 10
+    max_diff_chars: Optional[int] = None
 
 
 @app.get("/")
@@ -101,6 +111,24 @@ async def ingest_repos(payload: RepoIngestRequest) -> dict:
         repo_paths=payload.repo_paths,
         repository=payload.repository,
     )
+
+
+@app.post("/retrieve")
+async def retrieve_context(payload: RetrieveRequest) -> dict:
+    """Embed the diff, query Chroma, return context_chunks for the pipeline."""
+    chunks_with_metadata = get_context_chunks(
+        payload.raw_diff,
+        collection,
+        repository=payload.repository,
+        file_path=payload.file_path,
+        n_results=payload.n_results or 10,
+        max_diff_chars=payload.max_diff_chars,
+    )
+    context_chunks = context_chunks_to_strings(chunks_with_metadata)
+    return {
+        "context_chunks": context_chunks,
+        "chunks_with_metadata": chunks_with_metadata,
+    }
 
 
 @app.post("/analyze/diff")
