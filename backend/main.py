@@ -147,7 +147,6 @@ async def retrieve_context(payload: RetrieveRequest) -> dict:
         "chunks_with_metadata": chunks_with_metadata,
     }
 
-
 @app.post("/analyze/diff")
 async def analyze_diff(payload: DiffPayload) -> dict:
     """Run the full pipeline: ingestion (state init) → retrieval → detection → audit → remediation → patch audit.
