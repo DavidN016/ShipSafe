@@ -14,10 +14,18 @@ from dotenv import load_dotenv
 load_dotenv(_root / ".env")
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from backend.database.chroma import collection
+from backend.database.users_db import (
+    ConnectedRepo,
+    User,
+    get_db,
+    init_db,
+)
 from backend.ingest import chunk_text_for_extension, async_batch_upload, ingest_repo_paths
 from backend.database.retrieve import get_context_chunks, context_chunks_to_strings
 from backend.agents.graph import build_workflow
@@ -26,6 +34,20 @@ HOST = os.environ.get("SHIPSAFE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("SHIPSAFE_PORT", "8000"))
 
 app = FastAPI(title="ShipSafe Backend", version="0.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.on_event("startup")
+def on_startup() -> None:
+    init_db()
+
 
 # Compiled LangGraph workflow (ingestion → retrieval → detection → audit → remediation → patch_audit loop)
 _workflow = None
@@ -73,9 +95,93 @@ class RetrieveRequest(BaseModel):
     max_diff_chars: Optional[int] = None
 
 
+# --- Users & connected repos ---
+
+class UserUpsertRequest(BaseModel):
+    github_id: str
+    login: str
+
+
+class ConnectedRepoAddRequest(BaseModel):
+    repo_full_name: str
+
+
 @app.get("/")
 async def health_check() -> dict:
     return {"status": "ok"}
+
+
+@app.post("/users", response_model=dict)
+def upsert_user(payload: UserUpsertRequest, db: Session = Depends(get_db)) -> dict:
+    """Create or get user by GitHub id. Returns user id and login."""
+    user = db.query(User).filter(User.github_id == payload.github_id).first()
+    if user is None:
+        user = User(github_id=payload.github_id, login=payload.login)
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    return {"id": user.id, "github_id": user.github_id, "login": user.login}
+
+
+@app.get("/users/{github_id}/connected-repos", response_model=dict)
+def list_connected_repos(github_id: str, db: Session = Depends(get_db)) -> dict:
+    """List connected repo full names for a user."""
+    user = db.query(User).filter(User.github_id == github_id).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    repos = [r.repo_full_name for r in user.connected_repos]
+    return {"repos": repos}
+
+
+@app.post("/users/{github_id}/connected-repos", response_model=dict)
+def add_connected_repo(
+    github_id: str,
+    payload: ConnectedRepoAddRequest,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Connect a repo for a user (idempotent)."""
+    user = db.query(User).filter(User.github_id == github_id).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    existing = (
+        db.query(ConnectedRepo)
+        .filter(
+            ConnectedRepo.user_id == user.id,
+            ConnectedRepo.repo_full_name == payload.repo_full_name,
+        )
+        .first()
+    )
+    if existing is not None:
+        return {"repo_full_name": payload.repo_full_name, "connected": True}
+    conn = ConnectedRepo(user_id=user.id, repo_full_name=payload.repo_full_name)
+    db.add(conn)
+    db.commit()
+    return {"repo_full_name": payload.repo_full_name, "connected": True}
+
+
+@app.delete("/users/{github_id}/connected-repos", response_model=dict)
+def remove_connected_repo(
+    github_id: str,
+    repo_full_name: str,  # query param: ?repo_full_name=owner%2Frepo
+    db: Session = Depends(get_db),
+) -> dict:
+    """Disconnect a repo for a user."""
+    user = db.query(User).filter(User.github_id == github_id).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    conn = (
+        db.query(ConnectedRepo)
+        .filter(
+            ConnectedRepo.user_id == user.id,
+            ConnectedRepo.repo_full_name == repo_full_name,
+        )
+        .first()
+    )
+    if conn is None:
+        raise HTTPException(status_code=404, detail="Connected repo not found")
+    db.delete(conn)
+    db.commit()
+    return {"repo_full_name": repo_full_name, "connected": False}
 
 
 @app.post("/analyze")

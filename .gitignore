@@ -24,3 +24,5 @@ dist/
 # Data / logs (optional)
 data/
 *.log
+*.db
+backend/shipsafe.db
