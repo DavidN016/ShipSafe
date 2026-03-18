@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from backend.database.chroma import collection
+from backend.database.chroma import get_collection
 from backend.database.users_db import (
     ConnectedRepo,
     User,
@@ -49,6 +49,17 @@ def on_startup() -> None:
     init_db()
 
 
+# Lazily initialized Chroma collection (persistent vector store)
+_collection = None
+
+
+def _get_collection():
+    global _collection
+    if _collection is None:
+        _collection = get_collection()
+    return _collection
+
+
 # Compiled LangGraph workflow (ingestion → retrieval → detection → audit → remediation → patch_audit loop)
 _workflow = None
 
@@ -56,7 +67,7 @@ _workflow = None
 def _get_workflow():
     global _workflow
     if _workflow is None:
-        _workflow = build_workflow(collection)
+        _workflow = build_workflow(_get_collection())
     return _workflow
 
 
@@ -209,7 +220,7 @@ async def analyze_changes(payload: AnalyzeRequest) -> dict:
 
     if all_documents:
         await async_batch_upload(
-            collection=collection,
+            collection=_get_collection(),
             documents=all_documents,
             metadatas=all_metadatas,
             ids=all_ids,
@@ -230,7 +241,7 @@ async def ingest_repos(payload: RepoIngestRequest) -> dict:
     Reuses the same ingestion/chunking pipeline as /analyze.
     """
     return await ingest_repo_paths(
-        collection=collection,
+        collection=_get_collection(),
         repo_paths=payload.repo_paths,
         repository=payload.repository,
     )
@@ -241,7 +252,7 @@ async def retrieve_context(payload: RetrieveRequest) -> dict:
     """Embed the diff, query Chroma, return context_chunks for the pipeline."""
     chunks_with_metadata = get_context_chunks(
         payload.raw_diff,
-        collection,
+        _get_collection(),
         repository=payload.repository,
         file_path=payload.file_path,
         n_results=payload.n_results or 10,
