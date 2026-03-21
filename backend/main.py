@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
+
+import httpx
 
 # Ensure project root is on path so "backend" resolves when run from backend/ (e.g. uvicorn main:app)
 _root = Path(__file__).resolve().parent.parent
@@ -14,7 +18,7 @@ from dotenv import load_dotenv
 load_dotenv(_root / ".env")
 
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -29,6 +33,17 @@ from backend.database.users_db import (
 from backend.ingest import chunk_text_for_extension, async_batch_upload, ingest_repo_paths
 from backend.database.retrieve import get_context_chunks, context_chunks_to_strings
 from backend.agents.graph import build_workflow
+from backend.services.github_webhook import (
+    extract_push_compare,
+    fetch_compare_diff,
+    fetch_pull_request_diff,
+    get_github_token,
+    get_max_webhook_files,
+    parse_repo_from_payload,
+    should_process_pull_request,
+    split_unified_diff,
+    verify_github_signature,
+)
 
 HOST = os.environ.get("SHIPSAFE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("SHIPSAFE_PORT", "8000"))
@@ -69,6 +84,21 @@ def _get_workflow():
     if _workflow is None:
         _workflow = build_workflow(_get_collection())
     return _workflow
+
+
+async def _run_agent_workflow(initial: dict[str, Any]) -> dict[str, Any]:
+    """Run LangGraph pipeline in a thread pool (same as /analyze/diff)."""
+    workflow = _get_workflow()
+    loop = asyncio.get_event_loop()
+    final = await loop.run_in_executor(None, lambda: workflow.invoke(initial))
+    return {
+        "file_path": final.get("file_path"),
+        "vulnerabilities": final.get("vulnerabilities") or [],
+        "is_verified": final.get("is_verified"),
+        "audit_feedback": final.get("audit_feedback"),
+        "remediation_patch": final.get("remediation_patch"),
+        "analysis_summary": final.get("analysis_summary"),
+    }
 
 
 class FileChange(BaseModel):
@@ -269,25 +299,165 @@ async def analyze_diff(payload: DiffPayload) -> dict:
     """Run the full pipeline: ingestion (state init) → retrieval → detection → audit → remediation → patch audit.
     Request body: raw_diff, file_path; optional repository, commit_sha, original_code.
     Returns final state so caller can post analysis/patch to GitHub (e.g. PR comment)."""
-    import asyncio
-    initial: dict = {
+    initial: dict[str, Any] = {
         "raw_diff": payload.raw_diff,
         "file_path": payload.file_path,
         "repository": payload.repository,
         "commit_sha": payload.commit_sha,
         "original_code": payload.original_code or "",
     }
-    workflow = _get_workflow()
-    loop = asyncio.get_event_loop()
-    final = await loop.run_in_executor(None, lambda: workflow.invoke(initial))
-    return {
-        "file_path": final.get("file_path"),
-        "vulnerabilities": final.get("vulnerabilities") or [],
-        "is_verified": final.get("is_verified"),
-        "audit_feedback": final.get("audit_feedback"),
-        "remediation_patch": final.get("remediation_patch"),
-        "analysis_summary": final.get("analysis_summary"),
-    }
+    return await _run_agent_workflow(initial)
+
+
+@app.post("/webhook/github")
+async def github_webhook(
+    request: Request,
+    x_github_event: Optional[str] = Header(default=None, alias="X-GitHub-Event"),
+    x_hub_signature_256: Optional[str] = Header(default=None, alias="X-Hub-Signature-256"),
+) -> dict[str, Any]:
+    """
+    GitHub webhook entrypoint (agents.md §6).
+
+    - Verifies ``X-Hub-Signature-256`` when ``GITHUB_WEBHOOK_SECRET`` is set.
+    - **pull_request** (opened, synchronize, reopened, ready_for_review): fetches PR diff via API,
+      splits by file, runs the agent workflow per file (cap: ``SHIPSAFE_WEBHOOK_MAX_FILES``, default 25).
+    - **push**: compares ``before...after`` and runs the workflow per changed file (same cap).
+    - **ping**: acknowledges without running agents.
+
+    Requires ``GITHUB_TOKEN`` (or ``SHIPSAFE_GITHUB_TOKEN`` / ``GH_TOKEN``) with ``repo`` scope
+    to fetch diffs from the GitHub API.
+    """
+    body = await request.body()
+    if not verify_github_signature(body, x_hub_signature_256):
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    try:
+        payload: dict[str, Any] = json.loads(body.decode("utf-8") or "{}")
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}") from e
+
+    event = (x_github_event or "").lower()
+    if event == "ping":
+        return {"ok": True, "event": "ping", "message": "pong"}
+
+    token = get_github_token()
+    max_files = get_max_webhook_files()
+
+    if event == "pull_request":
+        if not token:
+            raise HTTPException(
+                status_code=503,
+                detail="GITHUB_TOKEN (or SHIPSAFE_GITHUB_TOKEN / GH_TOKEN) is required to fetch diffs",
+            )
+        run, skip_reason = should_process_pull_request(payload)
+        if not run:
+            return {"ok": True, "event": event, "skipped": True, "reason": skip_reason}
+
+        parsed = parse_repo_from_payload(payload)
+        if not parsed:
+            raise HTTPException(status_code=400, detail="Missing repository.full_name in payload")
+        owner, repo_name, full_name = parsed
+        pr = payload.get("pull_request") or {}
+        pr_number = pr.get("number")
+        if pr_number is None:
+            raise HTTPException(status_code=400, detail="Missing pull_request.number")
+        head = pr.get("head") or {}
+        commit_sha = head.get("sha") or ""
+
+        try:
+            full_diff = fetch_pull_request_diff(owner, repo_name, int(pr_number), token)
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"GitHub API error fetching PR diff: {e.response.status_code} {e.response.text[:500]}",
+            ) from e
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=502, detail=f"GitHub API request failed: {e}") from e
+
+        file_diffs = split_unified_diff(full_diff)
+        if not file_diffs and full_diff.strip():
+            file_diffs = [("unknown", full_diff)]
+
+        results: list[dict[str, Any]] = []
+        truncated = len(file_diffs) > max_files
+        for path, diff_text in file_diffs[:max_files]:
+            initial = {
+                "raw_diff": diff_text,
+                "file_path": path,
+                "repository": full_name,
+                "commit_sha": commit_sha,
+                "original_code": "",
+                "pr_number": int(pr_number),
+            }
+            out = await _run_agent_workflow(initial)
+            results.append(out)
+
+        return {
+            "ok": True,
+            "event": event,
+            "repository": full_name,
+            "pr_number": int(pr_number),
+            "files_analyzed": len(results),
+            "files_total_in_diff": len(file_diffs),
+            "truncated": truncated,
+            "results": results,
+        }
+
+    if event == "push":
+        if not token:
+            raise HTTPException(
+                status_code=503,
+                detail="GITHUB_TOKEN (or SHIPSAFE_GITHUB_TOKEN / GH_TOKEN) is required to fetch diffs",
+            )
+        compare = extract_push_compare(payload)
+        if not compare:
+            return {
+                "ok": True,
+                "event": event,
+                "skipped": True,
+                "reason": "no compare range (e.g. new branch or missing repository)",
+            }
+        owner, repo_name, full_name, before, after = compare
+
+        try:
+            full_diff = fetch_compare_diff(owner, repo_name, before, after, token)
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"GitHub API error fetching compare diff: {e.response.status_code} {e.response.text[:500]}",
+            ) from e
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=502, detail=f"GitHub API request failed: {e}") from e
+
+        file_diffs = split_unified_diff(full_diff)
+        if not file_diffs and full_diff.strip():
+            file_diffs = [("unknown", full_diff)]
+
+        results: list[dict[str, Any]] = []
+        truncated = len(file_diffs) > max_files
+        for path, diff_text in file_diffs[:max_files]:
+            initial = {
+                "raw_diff": diff_text,
+                "file_path": path,
+                "repository": full_name,
+                "commit_sha": after,
+                "original_code": "",
+            }
+            out = await _run_agent_workflow(initial)
+            results.append(out)
+
+        return {
+            "ok": True,
+            "event": event,
+            "repository": full_name,
+            "commit_sha": after,
+            "files_analyzed": len(results),
+            "files_total_in_diff": len(file_diffs),
+            "truncated": truncated,
+            "results": results,
+        }
+
+    return {"ok": True, "event": event or "unknown", "skipped": True, "reason": "event type not handled"}
 
 
 if __name__ == "__main__":

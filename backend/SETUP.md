@@ -72,3 +72,13 @@ If `SHIPSAFE_AUDITOR_MODEL` is not set, the Auditor uses the same LLM as the Det
   ```
 - Call `GET /` – you should get `{"status":"ok"}`.
 - Ensure `OPENAI_API_KEY` (or `ANTHROPIC_API_KEY`) is set when triggering the agent workflow; otherwise the Detector/Remediator will raise an error.
+
+## 5. GitHub webhook (`POST /webhook/github`)
+
+1. Expose your API (e.g. ngrok) and add a repository webhook:
+   - **Payload URL:** `https://<host>/webhook/github`
+   - **Content type:** `application/json`
+   - **Secret:** optional; if set, put the same value in `GITHUB_WEBHOOK_SECRET` in `.env`.
+   - **Events:** at least **Pull requests** (and optionally **Pushes**).
+2. Set `GITHUB_TOKEN` in `.env` to a PAT with **`repo`** scope (needed to download the PR/compare diff from the GitHub API).
+3. On `pull_request` (`opened`, `synchronize`, `reopened`, `ready_for_review`), ShipSafe fetches the unified diff, splits it by file, and runs the LangGraph pipeline per file (up to `SHIPSAFE_WEBHOOK_MAX_FILES`, default 25).

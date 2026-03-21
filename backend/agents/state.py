@@ -49,3 +49,6 @@ class AgentState(TypedDict, total=False):
 
     # Final output
     analysis_summary: str
+
+    # GitHub (webhook / PR comment flow)
+    pr_number: int
