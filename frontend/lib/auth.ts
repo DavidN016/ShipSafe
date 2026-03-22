@@ -9,7 +9,7 @@ export const authOptions: NextAuthOptions = {
       authorization: {
         params: {
           // Include 'repo' so the app can see private repos (e.g. for webhooks/PR comments).
-          scope: "read:user user:email repo",
+          scope: "read:user user:email repo admin:repo_hook",
         },
       },
     }),
@@ -24,6 +24,9 @@ export const authOptions: NextAuthOptions = {
     session({ session, token }) {
       if (session.user) {
         session.user.id = token.sub ?? "";
+      }
+      if (typeof token.access_token === "string") {
+        session.accessToken = token.access_token;
       }
       return session;
     },

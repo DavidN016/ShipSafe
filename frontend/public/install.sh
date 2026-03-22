@@ -1,11 +1,85 @@
 #!/usr/bin/env bash
-# ShipSafe pre-push — same behavior as https://shipsafe.dev/install.sh
-# Manual setup: mkdir -p .shipsafe/hooks && cp this file .shipsafe/hooks/pre-push && chmod +x .shipsafe/hooks/pre-push
-#                git config core.hooksPath .shipsafe/hooks
+# ShipSafe — install pre-push hook inside the repo at .shipsafe/hooks/ and set core.hooksPath.
+# Usage: curl -fsSL https://shipsafe.dev/install.sh | bash
+#
+# This writes a tracked path you can commit so teammates get the same hook after clone
+# (run this once per clone, or commit .shipsafe/ and re-run only when the hook changes).
 
 set -euo pipefail
 
-API_URL="${SHIPSAFE_API_URL:-http://localhost:8000}"
+RED=$'\033[0;31m'
+GRN=$'\033[0;32m'
+YLW=$'\033[0;33m'
+RST=$'\033[0m'
+
+DEFAULT_API_URL="https://shipsafe.dev"
+
+usage() {
+  cat <<'EOF'
+ShipSafe install — creates .shipsafe/hooks/pre-push and runs:
+  git config core.hooksPath .shipsafe/hooks
+
+  curl -fsSL https://shipsafe.dev/install.sh | bash
+
+Options:
+  -h, --help     Show this help
+  -u, --url URL  Default API base URL embedded in the hook (default: https://shipsafe.dev)
+
+Environment (install time):
+  SHIPSAFE_API_URL   Same as --url
+
+Runtime (each push):
+  SHIPSAFE_API_URL   Override API base URL
+  SHIPSAFE_TOKEN     Bearer token if the server sets SHIPSAFE_PREPUSH_TOKEN
+  SHIPSAFE_SKIP_PREPUSH=1   Bypass once: SHIPSAFE_SKIP_PREPUSH=1 git push
+EOF
+}
+
+INSTALL_DEFAULT_API="${SHIPSAFE_API_URL:-$DEFAULT_API_URL}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -u|--url)
+      INSTALL_DEFAULT_API="${2:?missing URL after --url}"
+      shift 2
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+if ! command -v git >/dev/null 2>&1; then
+  echo "${RED}ShipSafe install: git not found.${RST}" >&2
+  exit 1
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "${RED}ShipSafe install: python3 is required to write the hook.${RST}" >&2
+  exit 1
+fi
+
+GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
+  echo "${RED}ShipSafe install: not inside a git repository.${RST}" >&2
+  exit 1
+}
+
+HOOK_DIR="$GIT_ROOT/.shipsafe/hooks"
+PRE_PUSH="$HOOK_DIR/pre-push"
+mkdir -p "$HOOK_DIR"
+
+HOOK_TEMPLATE=$(cat <<'TEMPLATE'
+#!/usr/bin/env bash
+# ShipSafe pre-push — https://shipsafe.dev/install.sh
+# Light client: diff → POST /hooks/prepush → allow/block (heavy analysis on server).
+
+set -euo pipefail
+
+API_URL="${SHIPSAFE_API_URL:-__DEFAULT_API__}"
 ENDPOINT="${API_URL%/}/hooks/prepush"
 TOKEN="${SHIPSAFE_TOKEN:-}"
 
@@ -89,3 +163,15 @@ except Exception:
 done
 
 exit 0
+TEMPLATE
+)
+
+printf '%s' "$HOOK_TEMPLATE" | python3 -c "import sys; d=sys.argv[1]; t=sys.stdin.read(); sys.stdout.write(t.replace('__DEFAULT_API__', d))" "$INSTALL_DEFAULT_API" >"$PRE_PUSH"
+chmod +x "$PRE_PUSH"
+
+git -C "$GIT_ROOT" config core.hooksPath .shipsafe/hooks
+
+echo "${GRN}ShipSafe: wrote ${PRE_PUSH}${RST}"
+echo "${GRN}ShipSafe: git config core.hooksPath .shipsafe/hooks (this repo)${RST}"
+echo "${YLW}Default API: ${INSTALL_DEFAULT_API%/}/hooks/prepush — commit .shipsafe/ to share the hook with your team.${RST}"
+echo "Override: export SHIPSAFE_API_URL=https://your-host"

@@ -25,6 +25,7 @@ export function ReposList() {
 
   const githubId = session?.user?.id;
   const login = session?.user?.name ?? "";
+  const githubAccessToken = session?.accessToken;
 
   const ensureUserAndLoadConnected = useCallback(async () => {
     if (!githubId) return;
@@ -82,11 +83,27 @@ export function ReposList() {
         `${SHIPSAFE_API_URL}/users/${encodeURIComponent(githubId)}/connected-repos`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            ...(githubAccessToken
+              ? { "X-GitHub-Access-Token": githubAccessToken }
+              : {}),
+          },
           body: JSON.stringify({ repo_full_name: repoFullName }),
         }
       );
       if (res.ok) {
+        const data = (await res.json()) as {
+          webhook_registered?: boolean;
+          webhook_error?: string;
+          workflow_error?: string;
+        };
+        if (data.webhook_error) {
+          console.warn("ShipSafe webhook:", data.webhook_error);
+        }
+        if (data.workflow_error) {
+          console.warn("ShipSafe workflow file:", data.workflow_error);
+        }
         setConnectedRepos((prev) => new Set(prev).add(repoFullName));
       }
     } finally {
@@ -100,7 +117,14 @@ export function ReposList() {
     try {
       const res = await fetch(
         `${SHIPSAFE_API_URL}/users/${encodeURIComponent(githubId)}/connected-repos?repo_full_name=${encodeURIComponent(repoFullName)}`,
-        { method: "DELETE" }
+        {
+          method: "DELETE",
+          headers: {
+            ...(githubAccessToken
+              ? { "X-GitHub-Access-Token": githubAccessToken }
+              : {}),
+          },
+        }
       );
       if (res.ok) {
         setConnectedRepos((prev) => {

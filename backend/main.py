@@ -29,10 +29,20 @@ from backend.database.users_db import (
     User,
     get_db,
     init_db,
+    is_repository_connected,
 )
 from backend.ingest import chunk_text_for_extension, async_batch_upload, ingest_repo_paths
 from backend.database.retrieve import get_context_chunks, context_chunks_to_strings
 from backend.agents.graph import build_workflow
+from backend.services.github_hooks import (
+    callback_url_is_safe_for_demo,
+    delete_repo_webhook,
+    ensure_repo_webhook,
+    get_webhook_secret_for_config,
+    parse_owner_repo,
+    webhook_callback_url,
+)
+from backend.services.github_workflow_file import ensure_shipsafe_workflow_file
 from backend.services.github_webhook import (
     extract_push_compare,
     fetch_compare_diff,
@@ -174,13 +184,56 @@ def list_connected_repos(github_id: str, db: Session = Depends(get_db)) -> dict:
     return {"repos": repos}
 
 
+def _try_register_github_webhook(
+    repo_full_name: str, github_access_token: Optional[str]
+) -> tuple[Optional[int], Optional[str]]:
+    """
+    Register (or reuse) a repo webhook pointing at SHIPSAFE_WEBHOOK_PUBLIC_URL/webhook/github.
+    Returns (hook_id, error_message). hook_id None if skipped or failed.
+    """
+    cb = webhook_callback_url()
+    if not github_access_token:
+        return None, "Missing X-GitHub-Access-Token header (sign in again after scope change)"
+    if not cb or not callback_url_is_safe_for_demo(cb):
+        return None, "Set SHIPSAFE_WEBHOOK_PUBLIC_URL to your public API base (e.g. https://abc.ngrok-free.app)"
+    try:
+        owner, repo = parse_owner_repo(repo_full_name)
+    except ValueError as e:
+        return None, str(e)
+    secret = get_webhook_secret_for_config()
+    try:
+        hook_id = ensure_repo_webhook(owner, repo, github_access_token, cb, secret)
+        return hook_id, None
+    except httpx.HTTPStatusError as e:
+        msg = (e.response.text or "")[:300]
+        return None, f"GitHub API {e.response.status_code}: {msg}"
+    except httpx.RequestError as e:
+        return None, f"GitHub request failed: {e}"
+
+
+def _try_install_shipsafe_workflow(
+    repo_full_name: str, github_access_token: Optional[str]
+) -> tuple[Optional[bool], Optional[str]]:
+    """
+    Commit ``.github/workflows/shipsafe.yml`` via GitHub Contents API.
+    Returns (installed_or_unchanged, error_message). Skips when token missing.
+    """
+    if not github_access_token:
+        return None, "Missing X-GitHub-Access-Token header (required to add workflow file)"
+    ok, err = ensure_shipsafe_workflow_file(repo_full_name, github_access_token)
+    if ok:
+        return True, None
+    return False, err
+
+
 @app.post("/users/{github_id}/connected-repos", response_model=dict)
 def add_connected_repo(
     github_id: str,
     payload: ConnectedRepoAddRequest,
     db: Session = Depends(get_db),
+    x_github_access_token: Optional[str] = Header(default=None, alias="X-GitHub-Access-Token"),
 ) -> dict:
-    """Connect a repo for a user (idempotent)."""
+    """Connect a repo for a user (idempotent). Registers GitHub webhook when token + public URL are set."""
     user = db.query(User).filter(User.github_id == github_id).first()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
@@ -193,11 +246,95 @@ def add_connected_repo(
         .first()
     )
     if existing is not None:
-        return {"repo_full_name": payload.repo_full_name, "connected": True}
-    conn = ConnectedRepo(user_id=user.id, repo_full_name=payload.repo_full_name)
+        out: dict[str, Any] = {
+            "repo_full_name": payload.repo_full_name,
+            "connected": True,
+            "webhook_registered": existing.github_hook_id is not None,
+        }
+        if existing.github_hook_id is None:
+            hook_id, err = _try_register_github_webhook(
+                payload.repo_full_name, x_github_access_token
+            )
+            if hook_id is not None:
+                existing.github_hook_id = hook_id
+                db.commit()
+                out["webhook_registered"] = True
+            elif err:
+                out["webhook_error"] = err
+        wf_ok, wf_err = _try_install_shipsafe_workflow(
+            payload.repo_full_name, x_github_access_token
+        )
+        if wf_ok is True:
+            out["shipsafe_workflow"] = "installed_or_unchanged"
+        elif wf_ok is False and wf_err:
+            out["workflow_error"] = wf_err
+        return out
+
+    hook_id, hook_err = _try_register_github_webhook(
+        payload.repo_full_name, x_github_access_token
+    )
+    conn = ConnectedRepo(
+        user_id=user.id,
+        repo_full_name=payload.repo_full_name,
+        github_hook_id=hook_id,
+    )
     db.add(conn)
     db.commit()
-    return {"repo_full_name": payload.repo_full_name, "connected": True}
+    resp: dict[str, Any] = {
+        "repo_full_name": payload.repo_full_name,
+        "connected": True,
+        "webhook_registered": hook_id is not None,
+    }
+    if hook_err and hook_id is None:
+        resp["webhook_error"] = hook_err
+    wf_ok, wf_err = _try_install_shipsafe_workflow(
+        payload.repo_full_name, x_github_access_token
+    )
+    if wf_ok is True:
+        resp["shipsafe_workflow"] = "installed_or_unchanged"
+    elif wf_ok is False and wf_err:
+        resp["workflow_error"] = wf_err
+    return resp
+
+
+@app.post("/users/{github_id}/repos/shipsafe-workflow", response_model=dict)
+def install_shipsafe_workflow_route(
+    github_id: str,
+    payload: ConnectedRepoAddRequest,
+    db: Session = Depends(get_db),
+    x_github_access_token: Optional[str] = Header(default=None, alias="X-GitHub-Access-Token"),
+) -> dict[str, Any]:
+    """
+    Create or update ``.github/workflows/shipsafe.yml`` in the given repo (must already be connected).
+    Use this to retry after fixing token permissions or to refresh the workflow template.
+    """
+    user = db.query(User).filter(User.github_id == github_id).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    conn = (
+        db.query(ConnectedRepo)
+        .filter(
+            ConnectedRepo.user_id == user.id,
+            ConnectedRepo.repo_full_name == payload.repo_full_name,
+        )
+        .first()
+    )
+    if conn is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Repository is not connected; connect it first",
+        )
+    wf_ok, wf_err = _try_install_shipsafe_workflow(
+        payload.repo_full_name, x_github_access_token
+    )
+    if wf_ok is True:
+        return {
+            "repo_full_name": payload.repo_full_name,
+            "shipsafe_workflow": "installed_or_unchanged",
+        }
+    if wf_ok is None:
+        raise HTTPException(status_code=400, detail=wf_err or "Missing GitHub token")
+    raise HTTPException(status_code=502, detail=wf_err or "Could not install workflow")
 
 
 @app.delete("/users/{github_id}/connected-repos", response_model=dict)
@@ -205,8 +342,9 @@ def remove_connected_repo(
     github_id: str,
     repo_full_name: str,  # query param: ?repo_full_name=owner%2Frepo
     db: Session = Depends(get_db),
+    x_github_access_token: Optional[str] = Header(default=None, alias="X-GitHub-Access-Token"),
 ) -> dict:
-    """Disconnect a repo for a user."""
+    """Disconnect a repo; removes GitHub webhook when hook id and token are available."""
     user = db.query(User).filter(User.github_id == github_id).first()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
@@ -220,6 +358,14 @@ def remove_connected_repo(
     )
     if conn is None:
         raise HTTPException(status_code=404, detail="Connected repo not found")
+    if conn.github_hook_id is not None and x_github_access_token:
+        try:
+            owner, repo = parse_owner_repo(repo_full_name)
+            delete_repo_webhook(owner, repo, conn.github_hook_id, x_github_access_token)
+        except httpx.HTTPStatusError:
+            pass
+        except httpx.RequestError:
+            pass
     db.delete(conn)
     db.commit()
     return {"repo_full_name": repo_full_name, "connected": False}
@@ -312,6 +458,7 @@ async def analyze_diff(payload: DiffPayload) -> dict:
 @app.post("/webhook/github")
 async def github_webhook(
     request: Request,
+    db: Session = Depends(get_db),
     x_github_event: Optional[str] = Header(default=None, alias="X-GitHub-Event"),
     x_hub_signature_256: Optional[str] = Header(default=None, alias="X-Hub-Signature-256"),
 ) -> dict[str, Any]:
@@ -357,6 +504,13 @@ async def github_webhook(
         if not parsed:
             raise HTTPException(status_code=400, detail="Missing repository.full_name in payload")
         owner, repo_name, full_name = parsed
+        if not is_repository_connected(db, full_name):
+            return {
+                "ok": True,
+                "event": event,
+                "skipped": True,
+                "reason": "repository not connected in ShipSafe",
+            }
         pr = payload.get("pull_request") or {}
         pr_number = pr.get("number")
         if pr_number is None:
@@ -418,6 +572,13 @@ async def github_webhook(
                 "reason": "no compare range (e.g. new branch or missing repository)",
             }
         owner, repo_name, full_name, before, after = compare
+        if not is_repository_connected(db, full_name):
+            return {
+                "ok": True,
+                "event": event,
+                "skipped": True,
+                "reason": "repository not connected in ShipSafe",
+            }
 
         try:
             full_diff = fetch_compare_diff(owner, repo_name, before, after, token)

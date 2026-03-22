@@ -75,6 +75,19 @@ If `SHIPSAFE_AUDITOR_MODEL` is not set, the Auditor uses the same LLM as the Det
 
 ## 5. GitHub webhook (`POST /webhook/github`)
 
+### Demo: auto-register hooks from the UI
+
+1. Put your **public HTTPS API base** in `.env` (no trailing slash), e.g. after `ngrok http 8000`:
+   - `SHIPSAFE_WEBHOOK_PUBLIC_URL=https://abcd-123.ngrok-free.app`
+2. Set `GITHUB_WEBHOOK_SECRET` in `.env` (any random string). The same value is sent to GitHub when creating the hook and used to verify `X-Hub-Signature-256`.
+3. Set `GITHUB_TOKEN` to a PAT with **`repo`** scope — used **when a webhook fires** to download PR/compare diffs (this is separate from the user’s sign-in token).
+4. **Sign out and sign in again** in the app so GitHub re-authorizes with scope **`admin:repo_hook`** (required to create repo webhooks).
+5. Click **Connect** on a repo: the backend calls GitHub’s API to create a webhook to `{SHIPSAFE_WEBHOOK_PUBLIC_URL}/webhook/github`. Only repos **connected** in ShipSafe will run the agent when events arrive.
+
+If `SHIPSAFE_WEBHOOK_PUBLIC_URL` is missing, the repo still saves as connected but the response may include `webhook_error` explaining that the public URL is required.
+
+### Manual webhook (without UI auto-register)
+
 1. Expose your API (e.g. ngrok) and add a repository webhook:
    - **Payload URL:** `https://<host>/webhook/github`
    - **Content type:** `application/json`
