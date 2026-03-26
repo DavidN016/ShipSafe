@@ -108,3 +108,33 @@ def build_workflow(collection: Any):
 
     checkpointer = MemorySaver()
     return workflow.compile(checkpointer=checkpointer)
+
+
+def build_prepush_workflow(collection: Any):
+    """
+    Build a lightweight workflow for pre-push / CI blocking:
+      ingestion → retrieval → detection → audit → END
+
+    This avoids remediation/patch-audit loops and ensures `is_verified` reflects
+    "auditor-confirmed vulnerability" instead of "patch verified".
+    """
+    workflow = StateGraph(AgentState)
+    retrieval_node_fn = make_retrieval_node(collection)
+
+    workflow.add_node("ingestion", ingestion_node)
+    workflow.add_node("retrieval", retrieval_node_fn)
+    workflow.add_node("detection", detector_node)
+    workflow.add_node("audit", auditor_node)
+
+    workflow.add_edge(START, "ingestion")
+    workflow.add_edge("ingestion", "retrieval")
+    workflow.add_edge("retrieval", "detection")
+    workflow.add_conditional_edges(
+        "detection",
+        _route_after_detection,
+        {"audit": "audit", "end": END},
+    )
+    workflow.add_edge("audit", END)
+
+    checkpointer = MemorySaver()
+    return workflow.compile(checkpointer=checkpointer)

@@ -26,14 +26,17 @@ from sqlalchemy.orm import Session
 from backend.database.chroma import get_collection
 from backend.database.users_db import (
     ConnectedRepo,
+    ScanResult,
+    ScanRun,
     User,
     get_db,
     init_db,
     is_repository_connected,
+    record_scan_results,
 )
 from backend.ingest import chunk_text_for_extension, async_batch_upload, ingest_repo_paths
 from backend.database.retrieve import get_context_chunks, context_chunks_to_strings
-from backend.agents.graph import build_workflow
+from backend.agents.graph import build_prepush_workflow, build_workflow
 from backend.services.github_hooks import (
     callback_url_is_safe_for_demo,
     delete_repo_webhook,
@@ -87,6 +90,7 @@ def _get_collection():
 
 # Compiled LangGraph workflow (ingestion → retrieval → detection → audit → remediation → patch_audit loop)
 _workflow = None
+_prepush_workflow = None
 
 
 def _get_workflow():
@@ -94,6 +98,13 @@ def _get_workflow():
     if _workflow is None:
         _workflow = build_workflow(_get_collection())
     return _workflow
+
+
+def _get_prepush_workflow():
+    global _prepush_workflow
+    if _prepush_workflow is None:
+        _prepush_workflow = build_prepush_workflow(_get_collection())
+    return _prepush_workflow
 
 
 async def _run_agent_workflow(initial: dict[str, Any]) -> dict[str, Any]:
@@ -107,6 +118,21 @@ async def _run_agent_workflow(initial: dict[str, Any]) -> dict[str, Any]:
         "is_verified": final.get("is_verified"),
         "audit_feedback": final.get("audit_feedback"),
         "remediation_patch": final.get("remediation_patch"),
+        "analysis_summary": final.get("analysis_summary"),
+    }
+
+
+async def _run_prepush_workflow(initial: dict[str, Any]) -> dict[str, Any]:
+    """Run prepush graph (ingestion→retrieval→detection→audit) in a thread pool."""
+    workflow = _get_prepush_workflow()
+    loop = asyncio.get_event_loop()
+    final = await loop.run_in_executor(None, lambda: workflow.invoke(initial))
+    return {
+        "file_path": final.get("file_path"),
+        "vulnerabilities": final.get("vulnerabilities") or [],
+        "is_verified": final.get("is_verified"),
+        "audit_feedback": final.get("audit_feedback"),
+        "remediation_patch": "",  # not produced in prepush flow
         "analysis_summary": final.get("analysis_summary"),
     }
 
@@ -155,6 +181,12 @@ class UserUpsertRequest(BaseModel):
 
 class ConnectedRepoAddRequest(BaseModel):
     repo_full_name: str
+
+
+class PrepushRequest(BaseModel):
+    raw_diff: str
+    repository: Optional[str] = None
+    commit_sha: Optional[str] = None
 
 
 @app.get("/")
@@ -546,6 +578,18 @@ async def github_webhook(
             out = await _run_agent_workflow(initial)
             results.append(out)
 
+        try:
+            record_scan_results(
+                db,
+                source="webhook_pr",
+                repository=full_name,
+                commit_sha=commit_sha or None,
+                results=results,
+            )
+        except Exception:
+            # best-effort persistence; don't fail webhook response
+            pass
+
         return {
             "ok": True,
             "event": event,
@@ -607,6 +651,17 @@ async def github_webhook(
             out = await _run_agent_workflow(initial)
             results.append(out)
 
+        try:
+            record_scan_results(
+                db,
+                source="webhook_push",
+                repository=full_name,
+                commit_sha=after or None,
+                results=results,
+            )
+        except Exception:
+            pass
+
         return {
             "ok": True,
             "event": event,
@@ -619,6 +674,129 @@ async def github_webhook(
         }
 
     return {"ok": True, "event": event or "unknown", "skipped": True, "reason": "event type not handled"}
+
+
+def _require_prepush_token(authorization: Optional[str]) -> None:
+    required = (os.environ.get("SHIPSAFE_PREPUSH_TOKEN") or "").strip()
+    if not required:
+        return
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing Bearer token")
+    provided = authorization.split(" ", 1)[1].strip()
+    if provided != required:
+        raise HTTPException(status_code=403, detail="Invalid token")
+
+
+@app.post("/hooks/prepush")
+async def hooks_prepush(
+    payload: PrepushRequest,
+    db: Session = Depends(get_db),
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+) -> dict[str, Any]:
+    """
+    Endpoint used by:
+    - local git pre-push hook (`install.sh`)
+    - GitHub Actions workflow (`.github/workflows/shipsafe.yml`)
+
+    Returns: {allow_push: bool, reason?: str, results: [...]}
+    """
+    _require_prepush_token(authorization)
+
+    raw_diff = payload.raw_diff or ""
+    if not raw_diff.strip():
+        return {"allow_push": True, "reason": "empty diff", "results": []}
+
+    file_diffs = split_unified_diff(raw_diff)
+    if not file_diffs:
+        file_diffs = [("unknown", raw_diff)]
+
+    results: list[dict[str, Any]] = []
+    for path, diff_text in file_diffs[: get_max_webhook_files()]:
+        initial = {
+            "raw_diff": diff_text,
+            "file_path": path,
+            "repository": payload.repository,
+            "commit_sha": payload.commit_sha,
+            "original_code": "",
+        }
+        out = await _run_prepush_workflow(initial)
+        out["auditor_confirmed_vulnerable"] = bool(out.get("is_verified")) and bool(
+            out.get("vulnerabilities")
+        )
+        results.append(out)
+
+    allow_push = not any(r.get("auditor_confirmed_vulnerable") for r in results)
+    reason = None if allow_push else "auditor-confirmed findings detected"
+
+    try:
+        record_scan_results(
+            db,
+            source="prepush",
+            repository=payload.repository,
+            commit_sha=payload.commit_sha,
+            results=results,
+        )
+    except Exception:
+        pass
+
+    return {"allow_push": allow_push, "reason": reason, "results": results}
+
+
+@app.get("/users/{github_id}/findings", response_model=dict)
+def list_findings_for_user(
+    github_id: str,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Return recent scan results for repos connected by this user."""
+    user = db.query(User).filter(User.github_id == github_id).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    connected = [r.repo_full_name for r in user.connected_repos]
+    if not connected:
+        return {"runs": []}
+
+    limit = max(1, min(int(limit), 200))
+    runs = (
+        db.query(ScanRun)
+        .filter(ScanRun.repository.in_(connected))
+        .order_by(ScanRun.created_at.desc(), ScanRun.id.desc())
+        .limit(limit)
+        .all()
+    )
+
+    import json as _json
+
+    out_runs: list[dict[str, Any]] = []
+    for run in runs:
+        results = (
+            db.query(ScanResult)
+            .filter(ScanResult.scan_run_id == run.id)
+            .order_by(ScanResult.id.asc())
+            .all()
+        )
+        out_runs.append(
+            {
+                "id": run.id,
+                "source": run.source,
+                "repository": run.repository,
+                "commit_sha": run.commit_sha,
+                "created_at": run.created_at.isoformat() if getattr(run, "created_at", None) else None,
+                "results": [
+                    {
+                        "file_path": r.file_path,
+                        "auditor_confirmed_vulnerable": bool(r.auditor_confirmed_vulnerable),
+                        "vulnerabilities": _json.loads(r.vulnerabilities_json or "[]"),
+                        "audit_feedback": r.audit_feedback,
+                        "remediation_patch": r.remediation_patch,
+                    }
+                    for r in results
+                ],
+            }
+        )
+
+    return {"runs": out_runs}
 
 
 if __name__ == "__main__":
