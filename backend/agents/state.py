@@ -36,6 +36,7 @@ class AgentState(TypedDict, total=False):
 
     # Audit
     is_verified: bool
+    auditor_confirmed_vulnerable: bool
     audit_feedback: str
 
     # Remediation

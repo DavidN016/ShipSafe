@@ -116,6 +116,7 @@ async def _run_agent_workflow(initial: dict[str, Any]) -> dict[str, Any]:
         "file_path": final.get("file_path"),
         "vulnerabilities": final.get("vulnerabilities") or [],
         "is_verified": final.get("is_verified"),
+        "auditor_confirmed_vulnerable": bool(final.get("auditor_confirmed_vulnerable")),
         "audit_feedback": final.get("audit_feedback"),
         "remediation_patch": final.get("remediation_patch"),
         "analysis_summary": final.get("analysis_summary"),
@@ -131,6 +132,7 @@ async def _run_prepush_workflow(initial: dict[str, Any]) -> dict[str, Any]:
         "file_path": final.get("file_path"),
         "vulnerabilities": final.get("vulnerabilities") or [],
         "is_verified": final.get("is_verified"),
+        "auditor_confirmed_vulnerable": bool(final.get("auditor_confirmed_vulnerable")),
         "audit_feedback": final.get("audit_feedback"),
         "remediation_patch": "",  # not produced in prepush flow
         "analysis_summary": final.get("analysis_summary"),
@@ -720,9 +722,11 @@ async def hooks_prepush(
             "original_code": "",
         }
         out = await _run_prepush_workflow(initial)
-        out["auditor_confirmed_vulnerable"] = bool(out.get("is_verified")) and bool(
-            out.get("vulnerabilities")
-        )
+        # Keep this explicit for backward-compatibility with older state outputs.
+        if "auditor_confirmed_vulnerable" not in out:
+            out["auditor_confirmed_vulnerable"] = bool(out.get("is_verified")) and bool(
+                out.get("vulnerabilities")
+            )
         results.append(out)
 
     allow_push = not any(r.get("auditor_confirmed_vulnerable") for r in results)

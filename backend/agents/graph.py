@@ -6,6 +6,7 @@ Per AGENTS.md §4 and §5.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Literal
 
 from langgraph.graph import END, START, StateGraph
@@ -20,6 +21,10 @@ from .nodes import (
     detector_node,
     patch_audit_node,
     remediator_node,
+)
+
+_MAX_REMEDIATION_ITERATIONS = max(
+    1, int(os.environ.get("SHIPSAFE_MAX_REMEDIATION_ITERATIONS", "3"))
 )
 
 
@@ -59,8 +64,14 @@ def _route_after_audit(state: AgentState) -> Literal["remediation", "end"]:
 
 
 def _route_after_patch_audit(state: AgentState) -> Literal["remediation", "end"]:
-    """If patch is secure, end; else loop back to Remediator (AGENTS.md §5). Single-push flow: no PR comment."""
+    """
+    If patch is secure, end; else loop back to Remediator.
+
+    Safety cap prevents infinite remediation loops on persistent patch-audit failures.
+    """
     if state.get("is_verified"):
+        return "end"
+    if (state.get("iteration_count") or 0) >= _MAX_REMEDIATION_ITERATIONS:
         return "end"
     return "remediation"
 

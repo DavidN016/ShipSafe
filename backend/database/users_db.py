@@ -133,8 +133,8 @@ def record_scan_results(
     """
     Persist a scan run and per-file results.
 
-    `results` items are expected to look like backend.main._run_agent_workflow output:
-      {file_path, vulnerabilities, is_verified, audit_feedback, remediation_patch, analysis_summary}
+    `results` items are expected to look like backend.main workflow output:
+      {file_path, vulnerabilities, is_verified, auditor_confirmed_vulnerable, audit_feedback, remediation_patch}
     """
     import json as _json
 
@@ -144,7 +144,9 @@ def record_scan_results(
 
     for r in results:
         vulns = r.get("vulnerabilities") or []
-        auditor_confirmed = bool(r.get("is_verified")) and bool(vulns)
+        auditor_confirmed = bool(
+            r.get("auditor_confirmed_vulnerable", bool(r.get("is_verified")) and bool(vulns))
+        )
         db.add(
             ScanResult(
                 scan_run_id=run.id,

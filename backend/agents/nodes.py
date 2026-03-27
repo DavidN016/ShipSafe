@@ -206,7 +206,11 @@ def auditor_node(state: AgentState) -> dict[str, Any]:
     vulnerabilities = state.get("vulnerabilities") or []
     original_code = state.get("original_code") or ""
     if not vulnerabilities:
-        return {"is_verified": False, "audit_feedback": "No findings to verify."}
+        return {
+            "is_verified": False,
+            "auditor_confirmed_vulnerable": False,
+            "audit_feedback": "No findings to verify.",
+        }
 
     max_score, scores = _score_vulnerabilities_with_codebert(vulnerabilities, original_code)
     is_verified = max_score >= _CODEBERT_VERIFY_THRESHOLD
@@ -218,7 +222,11 @@ def auditor_node(state: AgentState) -> dict[str, Any]:
         )
     audit_feedback = "\n".join(parts)
 
-    return {"is_verified": is_verified, "audit_feedback": audit_feedback}
+    return {
+        "is_verified": is_verified,
+        "auditor_confirmed_vulnerable": bool(is_verified),
+        "audit_feedback": audit_feedback,
+    }
 
 
 # ---------------------------------------------------------------------------
