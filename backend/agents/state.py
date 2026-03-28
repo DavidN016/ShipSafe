@@ -1,14 +1,14 @@
 """
 Shared state for the ShipSafe LangGraph workflow.
 
-All agents read from and write to this centralized state per AGENTS.md.
+All agents read from and write to this centralized state (see agents.md).
 """
 
 from typing import List, TypedDict
 
 
 class Vulnerability(TypedDict, total=False):
-    """Detected security issue with metadata (per AGENTS.md example)."""
+    """Detected security issue with metadata."""
 
     type: str
     line_number: int

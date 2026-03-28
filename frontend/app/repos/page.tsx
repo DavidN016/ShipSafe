@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { AuthHeader } from "@/components/auth-header";
+import { LocalPrepushInstructions } from "@/components/local-prepush-instructions";
 import { ReposList } from "@/components/repos-list";
 
 export default async function ReposPage() {
@@ -21,6 +22,7 @@ export default async function ReposPage() {
           <p className="mt-1 text-zinc-600 dark:text-zinc-400">
             Choose which repos to connect with ShipSafe for security scanning.
           </p>
+          <LocalPrepushInstructions />
           <ReposList />
         </div>
       </main>

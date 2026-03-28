@@ -1,7 +1,7 @@
 """
 LangGraph workflow: Ingestion → Retrieval → Detection → Audit → Remediation → Patch verification (loop).
 
-Per AGENTS.md §4 and §5.
+See agents.md for agent roles and behavior.
 """
 
 from __future__ import annotations

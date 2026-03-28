@@ -497,7 +497,7 @@ async def github_webhook(
     x_hub_signature_256: Optional[str] = Header(default=None, alias="X-Hub-Signature-256"),
 ) -> dict[str, Any]:
     """
-    GitHub webhook entrypoint (agents.md §6).
+    GitHub webhook entrypoint.
 
     - Verifies ``X-Hub-Signature-256`` when ``GITHUB_WEBHOOK_SECRET`` is set.
     - **pull_request** (opened, synchronize, reopened, ready_for_review): fetches PR diff via API,

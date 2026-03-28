@@ -1,7 +1,7 @@
 """
 Agent nodes for the ShipSafe LangGraph workflow.
 
-Detector, Auditor, and Remediator per AGENTS.md §3.
+Detector, Auditor, and Remediator per agents.md.
 """
 
 import json
@@ -58,7 +58,7 @@ def _get_llm(model: str | None = None, temperature: float = 0.1):
     api_key = os.getenv("ANTHROPIC_API_KEY") or os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("Set ANTHROPIC_API_KEY or OPENAI_API_KEY")
-    # Prefer Anthropic if available (AGENTS.md specifies Claude for Detector/Remediator)
+    # Prefer Anthropic when configured (typical for Detector/Remediator)
     if os.getenv("ANTHROPIC_API_KEY") and ("claude" in model.lower() or not os.getenv("OPENAI_API_KEY")):
         try:
             from langchain_anthropic import ChatAnthropic
